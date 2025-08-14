@@ -1,0 +1,19 @@
+# .coveragerc
+
+[run]
+source = producer_graph
+branch = true
+
+[paths]
+source =
+    src/producer_graph
+    # Path for Hatch virtual environments (macOS/Linux)
+    */.hatch/env/virtual/*/lib/python*/site-packages/producer_graph
+    # Path for Hatch virtual environments (Windows)
+    *\\.hatch\\env\\virtual\\*\\Scripts\\site-packages\\producer_graph
+
+[report]
+exclude_lines =
+    no cov
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:

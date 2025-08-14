@@ -51,14 +51,14 @@ class Pipeline:
         """Initializes queues and validates the linear chain structure."""
         if not self._nodes:
             msg = "Pipeline must have at least one node."
-            raise ValueError
+            raise ValueError(msg)
 
         source_nodes = []
         for name, node in self._nodes.items():
             if node.input_node:
                 if node.input_node not in self._nodes:
                     msg = f"Node '{name}' has an invalid input: '{node.input_node}'"
-                    raise ValueError
+                    raise ValueError(msg)
 
                 producer_node = self._nodes[node.input_node]
                 self._queues[producer_node.name] = asyncio.Queue(maxsize=producer_node.max_queue_size)
