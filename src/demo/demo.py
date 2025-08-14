@@ -7,7 +7,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from producer_graph import Pipeline, PipelineNode
+from producer_graph import Pipeline, multitransform_node, standard_node
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -56,29 +56,24 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     nodes = [
-        PipelineNode(
-            name="fetch",
-            transform=fetch_source_file,
-            num_workers=5,
-            max_queue_size=10,
-        ),
-        PipelineNode(
+        standard_node("fetch", fetch_source_file, num_workers=5, max_queue_size=10),
+        multitransform_node(
             name="split",
-            multi_transform=split_data,
-            long_running=True,
+            transform=split_data,
+            spawn_thread=True,
             num_workers=2,
             max_queue_size=8,
             input_node="fetch",
         ),
-        PipelineNode(
+        standard_node(
             name="constrained_analyze",
             transform=constrained_analyze,
-            long_running=True,
+            spawn_thread=True,
             num_workers=1,
             max_queue_size=3,
             input_node="split",
         ),
-        PipelineNode(
+        standard_node(
             name="upload",
             transform=upload_to_s3,
             num_workers=4,
