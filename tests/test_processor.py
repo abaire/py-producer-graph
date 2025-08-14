@@ -12,9 +12,7 @@ from producer_graph._processor import (
 )
 
 
-async def run_processor_test(
-    processor, input_data, initial_work=False
-) -> list[Any]:
+async def run_processor_test(processor, input_data, *, initial_work=False) -> list[Any]:
     """Helper function to run a processor and collect its output."""
     input_queue = asyncio.Queue()
     output_queue = asyncio.Queue()
@@ -86,8 +84,7 @@ async def test_multi_output_processor_iterable():
     """Test MultiOutputProcessor with a transform returning an iterable."""
 
     def multi_transform(x) -> Generator[int, None, None]:
-        for i in range(x):
-            yield i
+        yield from range(x)
 
     processor = MultiOutputProcessor(multi_transform)
     input_data = [1, 2, 3]
@@ -134,9 +131,7 @@ async def test_batching_processor_by_timeout():
     input_queue = asyncio.Queue()
     output_queue = asyncio.Queue()
 
-    task = asyncio.create_task(
-        processor.run("test_worker", input_queue=input_queue, output_queue=output_queue)
-    )
+    task = asyncio.create_task(processor.run("test_worker", input_queue=input_queue, output_queue=output_queue))
 
     await input_queue.put(1)
     await input_queue.put(2)

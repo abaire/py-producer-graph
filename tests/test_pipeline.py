@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest
@@ -121,10 +122,8 @@ async def test_pipeline_run_data_flow(multi_node_pipeline_def):
     run_task = asyncio.create_task(pipeline.run(initial_data))
     await asyncio.sleep(0.2)  # Allow time for processing
     run_task.cancel()
-    try:
+    with contextlib.suppress(asyncio.CancelledError):
         await run_task
-    except asyncio.CancelledError:
-        pass
 
     # (1+1)*2 = 4 -> range(4) = 0,1,2,3
     # (2+1)*2 = 6 -> range(6) = 0,1,2,3,4,5
