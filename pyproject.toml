@@ -11,14 +11,14 @@ requires-python = ">=3.12"
 license = "MIT"
 keywords = []
 authors = [
-  { name = "Erik Abair", email = "erik.abair@bearbrains.work" },
+    { name = "Erik Abair", email = "erik.abair@bearbrains.work" },
 ]
 classifiers = [
-  "Development Status :: 4 - Beta",
-  "Programming Language :: Python",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: Implementation :: CPython",
-  "Programming Language :: Python :: Implementation :: PyPy",
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = []
 
@@ -32,7 +32,7 @@ path = "src/producer_graph/__about__.py"
 
 [tool.hatch.envs.types]
 extra-dependencies = [
-  "mypy>=1.0.0",
+    "mypy>=1.0.0",
 ]
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/producer_graph tests}"
@@ -42,7 +42,7 @@ source_pkgs = ["producer_graph", "tests"]
 branch = true
 parallel = true
 omit = [
-  "src/producer_graph/__about__.py",
+    "src/producer_graph/__about__.py",
 ]
 
 [tool.coverage.paths]
@@ -51,7 +51,14 @@ tests = ["tests", "*/producer-graph/tests"]
 
 [tool.coverage.report]
 exclude_lines = [
-  "no cov",
-  "if __name__ == .__main__.:",
-  "if TYPE_CHECKING:",
+    "no cov",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.hatch.envs.test]
+extra-dependencies = [
+    "pytest",
+    "pytest-asyncio",
+    "coverage",
 ]
