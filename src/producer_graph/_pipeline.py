@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -18,18 +19,31 @@ class PipelineNode:
     """Defines a node in the processing graph.
 
     name: The identifier for this node type, used by other nodes to link as a producer.
-    transform: The method that should be executed by instances of this processor.
+    transform: The method that should be executed by instances of this processor. This must produce a single output
+            artifact per input. This is mutually exclusive with `multi_transform`.
+    multi_transform: Method that should be executed by instances of this processor. This must produce an iterable of one
+            or more outputs per input. This is mutually exclusive with `transform`.
     num_workers: The maximum number of parallel instances of this processor.
     max_queue_size: The maximum number of outputs that may exist at any point in time.
     input_node: The `name` of a PipelineNode instance that provides the inputs to instances of this processor.
+
+    long_running: Indicates that the transform method takes considerable time and should be executed in a separate
+                  thread.
     """
 
     name: str
-    transform: Callable[[Any], Awaitable[Any] | Any]
     num_workers: int
     max_queue_size: int
+    transform: Callable[[Any], Awaitable[Any] | Any] | None = None
+    multi_transform: Callable[[Any], Iterable[Any] | AsyncIterable[Any]] | None = None
     input_node: str | None = None
     long_running: bool = False
+
+    def __post_init__(self):
+        """Validate that exactly one transform function is provided."""
+        if (self.transform is None) == (self.multi_transform is None):
+            msg = f"Node '{self.name}' must have exactly one of 'transform' or 'multi_transform' defined."
+            raise ValueError(msg)
 
 
 class Pipeline:
@@ -103,9 +117,18 @@ class Pipeline:
                     break
 
             result = await self._process_item(input_item, node)
+
             if output_queue:
-                logging.debug("Node %s placing %s into output queue.", node.name, result)
-                await output_queue.put(result)
+                if not node.multi_transform:
+                    await output_queue.put(result)
+                elif isinstance(result, AsyncIterable):
+                    async for sub_item in result:
+                        await output_queue.put(sub_item)
+                elif isinstance(result, Iterable) and not isinstance(result, str | bytes):
+                    for sub_item in result:
+                        await output_queue.put(sub_item)
+                else:
+                    await output_queue.put(result)
 
             if input_queue and input_item is not DONE_SENTINEL:
                 input_queue.task_done()
@@ -121,10 +144,17 @@ class Pipeline:
 
     async def _process_item(self, item: Any, node: PipelineNode) -> Any:
         """Helper to transform an item."""
-        if node.long_running:
-            return await asyncio.to_thread(node.transform, item)
+        method = node.transform if node.transform else node.multi_transform
 
-        result = node.transform(item)
+        if not method:
+            msg = f"Node {node.name} has neither transform nor multi_transform set."
+            raise ValueError(msg)
+
+        if node.long_running:
+            return await asyncio.to_thread(method, item)
+
+        result = method(item)
+
         if asyncio.iscoroutine(result):
             return await result
         return result
