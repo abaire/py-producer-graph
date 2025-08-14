@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 DONE_SENTINEL = object()
 
+type BasicTransformCallable = Callable[[Any], Awaitable[Any] | Any]
+type MultiTransformCallbale = Callable[[Any], Iterable[Any] | AsyncIterable[Any]]
+type TransformCallable = BasicTransformCallable | MultiTransformCallbale
+
+# Folds a single input item into some container.
+# E.g., fold_list(item: Any, state: list[Any]) -> list[any]
+type BatchingCallable = Callable[[Any, Any], Any]
+
 
 class Processor(Protocol):
     """A protocol defining the interface for all worker logic classes."""
@@ -20,7 +28,7 @@ class Processor(Protocol):
     async def run(
         self,
         worker_name: str,
-        input_queue: asyncio.Queue,
+        input_queue: asyncio.Queue | None = None,
         initial_work: Iterable[Any] | None = None,
         shutdown_barrier: asyncio.Barrier | None = None,
         output_queue: asyncio.Queue | None = None,
@@ -28,12 +36,24 @@ class Processor(Protocol):
         """The main execution loop for a worker."""
 
 
-type BasicTransformCallable = Callable[[Any], Awaitable[Any] | Any]
-type MultiTransformCallbale = Callable[[Any], Iterable[Any] | AsyncIterable[Any]]
-type TransformCallable = BasicTransformCallable | MultiTransformCallbale
-
-
 class _ProcessorBase:
+    async def _handle_done_event(
+        self, name: str, shutdown_barrier: asyncio.Barrier | None = None, output_queue: asyncio.Queue | None = None
+    ) -> None:
+        if not output_queue:
+            return
+
+        try:
+            if not shutdown_barrier or not await shutdown_barrier.wait():
+                logger.debug("Last worker for node '%s' finished. Signaling done downstream.", name)
+                await output_queue.put(DONE_SENTINEL)
+
+        except asyncio.BrokenBarrierError:
+            # This can happen if the pipeline is cancelled.
+            logger.warning("Shutdown barrier for node %s was broken.", name)
+
+
+class _TransformProcessorBase(_ProcessorBase):
     def __init__(self, transform: TransformCallable, *, spawn_thread: bool = False):
         self.transform = transform
         self.spawn_thread = spawn_thread
@@ -41,7 +61,7 @@ class _ProcessorBase:
     async def run(
         self,
         worker_name: str,
-        input_queue: asyncio.Queue,
+        input_queue: asyncio.Queue | None = None,
         initial_work: Iterable[Any] | None = None,
         shutdown_barrier: asyncio.Barrier | None = None,
         output_queue: asyncio.Queue | None = None,
@@ -86,23 +106,8 @@ class _ProcessorBase:
             return await result
         return result
 
-    async def _handle_done_event(
-        self, name: str, shutdown_barrier: asyncio.Barrier | None = None, output_queue: asyncio.Queue | None = None
-    ) -> None:
-        if not output_queue:
-            return
 
-        try:
-            if not shutdown_barrier or not await shutdown_barrier.wait():
-                logger.debug("Last worker for node '%s' finished. Signaling done downstream.", name)
-                await output_queue.put(DONE_SENTINEL)
-
-        except asyncio.BrokenBarrierError:
-            # This can happen if the pipeline is cancelled.
-            logger.warning("Shutdown barrier for node %s was broken.", name)
-
-
-class StandardProcessor(_ProcessorBase):
+class StandardProcessor(_TransformProcessorBase):
     """Performs 1:1 transformations of input -> output."""
 
     def __init__(self, transform: BasicTransformCallable, *, spawn_thread: bool = False):
@@ -112,7 +117,7 @@ class StandardProcessor(_ProcessorBase):
         await output_queue.put(result)
 
 
-class MultiOutputProcessor(_ProcessorBase):
+class MultiOutputProcessor(_TransformProcessorBase):
     """Performs 1:n transformations of input -> output."""
 
     def __init__(self, transform: MultiTransformCallbale, *, spawn_thread: bool = False):
@@ -127,3 +132,127 @@ class MultiOutputProcessor(_ProcessorBase):
                 await output_queue.put(sub_item)
         else:
             await output_queue.put(result)
+
+
+def _fold_list(value: Any, batch: list[Any] | None) -> list[Any]:
+    """Default batching function that simply adds items to a list."""
+    if batch is None:
+        batch = []
+
+    batch.append(value)
+    return batch
+
+
+class BatchingProcessor(_ProcessorBase):
+    """A processor that groups items into batches by size or timeout."""
+
+    def __init__(
+        self, batch_size: int, timeout_seconds: float = 0.0, batching_function: BatchingCallable | None = None
+    ):
+        if batch_size <= 1:
+            msg = f"batch_size ({batch_size}) must be > 1"
+            raise ValueError(msg)
+
+        if timeout_seconds < 0.0:
+            msg = f"timeout ({timeout_seconds}) must be >= 0"
+            raise ValueError(msg)
+
+        self.batch_size = batch_size
+        self.timeout_seconds = timeout_seconds
+        self.batching_function = batching_function if batching_function else _fold_list
+
+    async def _produce_predefined_batches(self, initial_work: Iterable[Any], output_queue: asyncio.Queue) -> None:
+        current_batch = None
+        for item in initial_work:
+            current_batch = self.batching_function(item, current_batch)
+            if len(current_batch) >= self.batch_size:
+                await output_queue.put(current_batch)
+                current_batch = None
+
+        if current_batch:
+            await output_queue.put(current_batch)
+
+        await output_queue.put(DONE_SENTINEL)
+
+    async def _produce_batches(
+        self,
+        worker_name: str,
+        input_queue: asyncio.Queue | None = None,
+        shutdown_barrier: asyncio.Barrier | None = None,
+        output_queue: asyncio.Queue | None = None,
+    ) -> None:
+        current_batch = None
+        timeout_task = None
+
+        while True:
+            if not current_batch:
+                item = await input_queue.get()
+                if item is DONE_SENTINEL:
+                    break
+                current_batch = self.batching_function(item, current_batch)
+
+            if len(current_batch) >= self.batch_size:
+                logger.debug("%s emitting full batch of %d", worker_name, len(current_batch))
+                await output_queue.put(current_batch)
+                current_batch = None
+                continue
+
+            timeout_task = None
+            if self.timeout_seconds:
+                timeout_task = asyncio.create_task(asyncio.sleep(self.timeout_seconds))
+
+            item = None
+            while len(current_batch) < self.batch_size:
+                get_task = asyncio.create_task(input_queue.get())
+
+                tasks_to_wait = [get_task]
+                if timeout_task:
+                    tasks_to_wait.append(timeout_task)
+
+                done, pending = await asyncio.wait(tasks_to_wait, return_when=asyncio.FIRST_COMPLETED)
+
+                if timeout_task and timeout_task in done:
+                    get_task.cancel()
+                    break
+
+                item = get_task.result()
+                if item is DONE_SENTINEL:
+                    if timeout_task:
+                        timeout_task.cancel()
+                    await input_queue.put(DONE_SENTINEL)
+                    break
+
+                current_batch = self.batching_function(item, current_batch)
+
+            if current_batch:
+                await output_queue.put(current_batch)
+                current_batch = None
+
+            if item is DONE_SENTINEL:
+                break
+
+        await self._handle_done_event(worker_name, shutdown_barrier, output_queue)
+
+    async def run(
+        self,
+        worker_name: str,
+        input_queue: asyncio.Queue | None = None,
+        initial_work: Iterable[Any] | None = None,
+        shutdown_barrier: asyncio.Barrier | None = None,
+        output_queue: asyncio.Queue | None = None,
+    ) -> None:
+        """The standard item-by-item processing loop."""
+
+        if not output_queue:
+            msg = f"BatchProcessor {worker_name} was configured without an output queue."
+            raise ValueError(msg)
+
+        if initial_work:
+            await self._produce_predefined_batches(initial_work, output_queue)
+            return
+
+        if not input_queue:
+            msg = f"BatchProcessor {worker_name} has neither initial_work nor an input queue."
+            raise ValueError(msg)
+
+        await self._produce_batches(worker_name, input_queue, shutdown_barrier, output_queue)
