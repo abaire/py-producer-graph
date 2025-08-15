@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DONE_SENTINEL = object()
+NO_OUTPUT = object()
 
 type BasicTransformCallable = Callable[[Any], Awaitable[Any] | Any]
 type MultiTransformCallbale = Callable[[Any], Iterable[Any] | AsyncIterable[Any]]
@@ -85,7 +86,7 @@ class _TransformProcessorBase(_ProcessorBase):
 
             result = await self._process_item(input_item)
 
-            if output_queue:
+            if result is not NO_OUTPUT and output_queue:
                 await self._produce_output(result, output_queue)
 
             if input_queue and input_item is not DONE_SENTINEL:

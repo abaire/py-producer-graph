@@ -6,6 +6,7 @@ import pytest
 
 from producer_graph._processor import (
     DONE_SENTINEL,
+    NO_OUTPUT,
     BatchingProcessor,
     MultiOutputProcessor,
     StandardProcessor,
@@ -173,3 +174,33 @@ async def test_batching_processor_custom_function():
     input_data = [1, 2, 1, 3, 2, 4]
     results = await run_processor_test(processor, input_data)
     assert results == [{1, 2, 3}, {2, 4}]
+
+
+@pytest.mark.asyncio
+async def test_standard_processor_no_output():
+    """Test StandardProcessor correctly filters out NO_OUTPUT sentinels."""
+
+    def filtering_transform(x):
+        if x % 2 == 0:
+            return NO_OUTPUT
+        return x * 2
+
+    processor = StandardProcessor(filtering_transform)
+    input_data = [1, 2, 3, 4, 5]
+    results = await run_processor_test(processor, input_data)
+    assert results == [2, 6, 10]
+
+
+@pytest.mark.asyncio
+async def test_multi_output_processor_no_output():
+    """Test MultiOutputProcessor correctly filters out NO_OUTPUT sentinels."""
+
+    def filtering_multi_transform(x):
+        if x % 2 == 0:
+            return NO_OUTPUT
+        return [x, x]
+
+    processor = MultiOutputProcessor(filtering_multi_transform)
+    input_data = [1, 2, 3, 4, 5]
+    results = await run_processor_test(processor, input_data)
+    assert results == [1, 1, 3, 3, 5, 5]
