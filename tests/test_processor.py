@@ -152,12 +152,93 @@ async def test_batching_processor_by_timeout():
 
 
 @pytest.mark.asyncio
+async def test_batching_processor_force_complete_overrides_timeout():
+    """Test that a forced batch is emitted immediately, even with a timeout."""
+
+    def stop_on_value(item, batch: list | None) -> tuple[list, bool]:
+        if batch is None:
+            batch = []
+        batch.append(item)
+        return batch, item == "STOP"
+
+    processor = BatchingProcessor(batch_size=5, timeout_seconds=10, batching_function=stop_on_value)
+    input_queue = asyncio.Queue()
+    output_queue = asyncio.Queue()
+
+    task = asyncio.create_task(processor.run("test_worker", input_queue=input_queue, output_queue=output_queue))
+
+    await input_queue.put(1)
+    await input_queue.put("STOP")
+
+    # The batch should be emitted immediately, not after the 10s timeout.
+    # We'll use a short timeout to ensure the test fails if it's slow.
+    try:
+        result = await asyncio.wait_for(output_queue.get(), timeout=0.1)
+        assert result == [1, "STOP"]
+    finally:
+        await input_queue.put(DONE_SENTINEL)
+        # Wait for the processor to finish cleaning up.
+        while not output_queue.empty():
+            await output_queue.get()
+        await task
+
+
+@pytest.mark.asyncio
 async def test_batching_processor_with_initial_work():
     """Test BatchingProcessor with initial_work provided."""
     processor = BatchingProcessor(batch_size=2)
     input_data = [1, 2, 3, 4, 5]
     results = await run_processor_test(processor, input_data, initial_work=True)
     assert results == [[1, 2], [3, 4], [5]]
+
+
+@pytest.mark.asyncio
+async def test_batching_processor_force_complete_initial_work():
+    """Test BatchingProcessor with a batching function that forces completion."""
+
+    def stop_on_value(item, batch: list | None) -> tuple[list, bool]:
+        if batch is None:
+            batch = []
+        batch.append(item)
+        return batch, item == "STOP"
+
+    processor = BatchingProcessor(batch_size=5, batching_function=stop_on_value)
+    input_data = [1, 2, "STOP", 3, 4, 5]
+    results = await run_processor_test(processor, input_data, initial_work=True)
+    assert results == [[1, 2, "STOP"], [3, 4, 5]]
+
+
+@pytest.mark.asyncio
+async def test_batching_processor_force_complete_from_queue():
+    """Test that a forced batch is emitted immediately from a queue."""
+
+    def stop_on_value(item, batch: list | None) -> tuple[list, bool]:
+        if batch is None:
+            batch = []
+        batch.append(item)
+        return batch, item == "STOP"
+
+    processor = BatchingProcessor(batch_size=5, batching_function=stop_on_value)
+    input_queue = asyncio.Queue()
+    output_queue = asyncio.Queue()
+
+    task = asyncio.create_task(processor.run("test_worker", input_queue=input_queue, output_queue=output_queue))
+
+    await input_queue.put(1)
+    await input_queue.put(2)
+    await input_queue.put("STOP")
+
+    result1 = await output_queue.get()
+    assert result1 == [1, 2, "STOP"]
+
+    await input_queue.put(3)
+    await input_queue.put(DONE_SENTINEL)
+
+    result2 = await output_queue.get()
+    assert result2 == [3]
+
+    assert await output_queue.get() is DONE_SENTINEL
+    await task
 
 
 @pytest.mark.asyncio
@@ -168,7 +249,7 @@ async def test_batching_processor_custom_function():
         if batch is None:
             batch = set()
         batch.add(item)
-        return batch
+        return batch, False
 
     processor = BatchingProcessor(batch_size=3, batching_function=custom_batching)
     input_data = [1, 2, 1, 3, 2, 4]

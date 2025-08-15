@@ -19,8 +19,10 @@ type MultiTransformCallbale = Callable[[Any], Iterable[Any] | AsyncIterable[Any]
 type TransformCallable = BasicTransformCallable | MultiTransformCallbale
 
 # Folds a single input item into some container.
-# E.g., fold_list(item: Any, state: list[Any]) -> list[any]
-type BatchingCallable = Callable[[Any, Any], Any]
+# E.g., fold_list(item: Any, state: list[Any]) -> tuple[list[any], bool]
+# The second element of the returned tuple may be set to "True" to indicate that the batch must be considered complete,
+# even if there is room for more elements.
+type BatchingCallable = Callable[[Any, Any], tuple[Any, bool]]
 
 
 class Processor(Protocol):
@@ -135,13 +137,13 @@ class MultiOutputProcessor(_TransformProcessorBase):
             await output_queue.put(result)
 
 
-def _fold_list(value: Any, batch: list[Any] | None) -> list[Any]:
+def _fold_list(value: Any, batch: list[Any] | None) -> tuple[list[Any], bool]:
     """Default batching function that simply adds items to a list."""
     if batch is None:
         batch = []
 
     batch.append(value)
-    return batch
+    return batch, False
 
 
 class BatchingProcessor(_ProcessorBase):
@@ -165,8 +167,8 @@ class BatchingProcessor(_ProcessorBase):
     async def _produce_predefined_batches(self, initial_work: Iterable[Any], output_queue: asyncio.Queue) -> None:
         current_batch = None
         for item in initial_work:
-            current_batch = self.batching_function(item, current_batch)
-            if len(current_batch) >= self.batch_size:
+            current_batch, force_complete = self.batching_function(item, current_batch)
+            if force_complete or len(current_batch) >= self.batch_size:
                 await output_queue.put(current_batch)
                 current_batch = None
 
@@ -183,16 +185,16 @@ class BatchingProcessor(_ProcessorBase):
         output_queue: asyncio.Queue | None = None,
     ) -> None:
         current_batch = None
-        timeout_task = None
 
         while True:
+            force_complete = False
             if not current_batch:
                 item = await input_queue.get()
                 if item is DONE_SENTINEL:
                     break
-                current_batch = self.batching_function(item, current_batch)
+                current_batch, force_complete = self.batching_function(item, current_batch)
 
-            if len(current_batch) >= self.batch_size:
+            if force_complete or len(current_batch) >= self.batch_size:
                 logger.debug("%s emitting full batch of %d", worker_name, len(current_batch))
                 await output_queue.put(current_batch)
                 current_batch = None
@@ -223,7 +225,9 @@ class BatchingProcessor(_ProcessorBase):
                     await input_queue.put(DONE_SENTINEL)
                     break
 
-                current_batch = self.batching_function(item, current_batch)
+                current_batch, force_complete = self.batching_function(item, current_batch)
+                if force_complete:
+                    break
 
             if current_batch:
                 await output_queue.put(current_batch)
