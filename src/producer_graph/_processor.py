@@ -70,6 +70,10 @@ class _TransformProcessorBase(_ProcessorBase):
         output_queue: asyncio.Queue | None = None,
     ) -> None:
         """The standard item-by-item processing loop."""
+        if not (input_queue or initial_work):
+            logging.debug("No work provided, exiting processor %s", worker_name)
+            return
+
         work_iterator = iter(initial_work) if initial_work else None
 
         while True:
